@@ -102,6 +102,12 @@ function prices(ctx: ExtensionContext, cfg: Config) {
 	};
 }
 
+/** Cache read price as a fraction of base input, from the model (0.05 on the 5.5 models), else 0.1. */
+function readRatio(ctx: ExtensionContext): number {
+	const cost = (ctx.model as any)?.cost ?? {};
+	return cost.input > 0 && cost.cacheRead > 0 ? cost.cacheRead / cost.input : 0.1;
+}
+
 const perTok = (perMTok: number) => perMTok / 1_000_000;
 
 // ---- todo list --------------------------------------------------------------------------------
@@ -294,9 +300,9 @@ const OUTPUT_MULTIPLIER = 5;
  * that does not exist yet (the nudge): it costs output, a cache write and reads. A handoff already written is in the
  * context either way, so it does not count.
  */
-function cutPays(cfg: Config, removed: number, rewrite: number, unwritten = 0): boolean {
+function cutPays(cfg: Config, removed: number, rewrite: number, unwritten = 0, read = 0.1): boolean {
 	return (
-		(removed - unwritten) * 0.1 * cfg.expectedFutureRequests >
+		(removed - unwritten) * read * cfg.expectedFutureRequests >
 		(rewrite + unwritten) * cfg.cacheWriteMultiplier + unwritten * OUTPUT_MULTIPLIER
 	);
 }
@@ -793,7 +799,7 @@ export default function (pi: ExtensionAPI) {
 					note = "\n\nNot compacted: the range contains a recall result from this request. Answer the user from it; it is removed automatically after your answer.";
 				} else if (removed < cfg.minCompactTokens) {
 					note = `\n\nNot compacted: only ~${removed} tokens would be removed. Continue normally.`;
-				} else if (!cutPays(cfg, removed, (rewrite = rewriteTokens(entries, start, new Set(span), end) + Math.ceil(requests.length / 4)))) {
+				} else if (!cutPays(cfg, removed, (rewrite = rewriteTokens(entries, start, new Set(span), end) + Math.ceil(requests.length / 4)), 0, readRatio(ctx))) {
 					note = `\n\nNot compacted: removing ~${removed} tokens from [#${tag}] would make the cache write ~${rewrite} kept tokens again, which costs more than it saves. A later tag, right after an answer, is cheaper.`;
 				} else {
 					const omit = span.filter(visible).map((e) => e.sourceEntry.id);
@@ -1298,7 +1304,7 @@ export default function (pi: ExtensionAPI) {
 				const removed = tokensOf([...span].flatMap((x) => x.messages));
 				// Removed requests come back verbatim in the result.
 				const requests = Math.ceil(removedRequests([...span].map(first), requestTags).length / 4);
-				return cutPays(cfg, removed, rewriteTokens(entries, i, span, last) + requests, Math.min(1500, Math.max(200, Math.ceil(removed / 5))));
+				return cutPays(cfg, removed, rewriteTokens(entries, i, span, last) + requests, Math.min(1500, Math.max(200, Math.ceil(removed / 5))), readRatio(ctx));
 			};
 			const startOf = (e: Projected | undefined) => (e ? cutStart(entries, entries.indexOf(e), start) : -1);
 			const candidates = [...(earlier.length > 0 ? [{ tag: 0, at: base }] : []), ...settled.filter((e) => tagOf(e) !== undefined).map((e) => ({ tag: tagOf(e)!, at: startOf(e) }))];

@@ -22,6 +22,9 @@ test("cutPays: big removals pay, small ones next to a big rewrite do not", () =>
 	// An unwritten handoff costs output and a write on top.
 	assert.ok(cutPays(DEFAULTS, 3_000, 0, 0));
 	assert.ok(!cutPays(DEFAULTS, 3_000, 0, 1_000));
+	// Cheaper reads (5.5 models: 5% of input) save less.
+	assert.ok(cutPays(DEFAULTS, 2_000, 700));
+	assert.ok(!cutPays(DEFAULTS, 2_000, 700, 0, 0.05));
 });
 
 test("renderList shows open tasks, folds finished ones, lists rules", () => {
