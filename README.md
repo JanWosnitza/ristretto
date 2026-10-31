@@ -54,7 +54,7 @@ Options are stored in `~/.pi/agent/ristretto.json`. Only values that differ from
 
 | Option | Default | Description |
 |---|---|---|
-| `contextBudgetTokens` | 40000 | Below this context size no compaction is asked for (0 = always ask) |
+| `contextBudgetTokens` | 40000 | Below this context size no compaction is asked for (0 = always ask). Measured from the last response's token usage, so it includes the system prompt and tool definitions |
 | `minCompactTokens` | 800 | Smallest range a compaction may remove |
 | `reminderEveryTokens` | 25000 | Remind the model to compact after this many tokens since the last compaction (0 = off) |
 | `nudgeUncompactedTokens` | 2000 | Once per request, ask for the task list after this much tool work without a `todos` call (0 = off) |

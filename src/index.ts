@@ -369,6 +369,7 @@ export default function (pi: ExtensionAPI) {
 	const pending = new Map<string, { omit: string[]; removedTokens: number; close?: { promptId: string; answerTs: number; note: string } }>();
 	const stats = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, compactions: 0, removedTokens: 0 };
 	/** The current run: context size at its start, and whether it compacted or the model was nudged. */
+	let usageGap = 0;
 	let run = { startTokens: 0, compacted: false, nudged: false, closeAsked: false, closing: false, closeTotal: 0 };
 	/** First step tag of work done while no task was in progress (in this request, since the last compaction). */
 	let untrackedFrom: number | undefined;
@@ -1368,7 +1369,29 @@ export default function (pi: ExtensionAPI) {
 	// Nudge and reminder ride on a tool result: a separate message reaches Claude Code as a message from the user,
 	// which the model rightly distrusts. The guideline names the source of [ristretto] notes.
 	function overBudget(ctx: ExtensionContext): boolean {
-		return tokensOf(projection(ctx).flatMap((e) => e.messages)) >= cfg.contextBudgetTokens;
+		return contextTokens(ctx) >= cfg.contextBudgetTokens;
+	}
+
+	/**
+	 * Context size as the model sees it: the usage of the last response plus estimates for later messages.
+	 * After an edit that usage is stale, so the estimate is used, corrected by the gap between usage and
+	 * estimate last seen (system prompt, tool definitions, estimate error).
+	 */
+	function contextTokens(ctx: ExtensionContext): number {
+		const entries = projection(ctx);
+		const estimate = tokensOf(entries.flatMap((e) => e.messages));
+		let i = entries.length - 1;
+		while (i >= 0 && !(first(entries[i])?.role === "assistant" && first(entries[i]).usage && first(entries[i]).stopReason !== "error" && first(entries[i]).stopReason !== "aborted")) i--;
+		if (i < 0) return estimate + usageGap;
+		const branch = ctx.sessionManager.getBranch() as any[];
+		const at = branch.findIndex((e) => e.id === entries[i].sourceEntry?.id);
+		if (at < 0 || branch.slice(at + 1).some((e) => e.type === "context_edit")) return estimate + usageGap;
+		const u = first(entries[i]).usage;
+		const upTo = tokensOf(entries.slice(0, i + 1).flatMap((e) => e.messages));
+		const real = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0) + (u.output ?? 0);
+		if (real <= 0) return estimate + usageGap;
+		usageGap = real - upTo;
+		return estimate + usageGap;
 	}
 
 	/** The full how-to, when the context is over budget and the how-to is not in it (never sent, or compacted away). */
@@ -1386,7 +1409,7 @@ export default function (pi: ExtensionAPI) {
 
 	function dueNote(ctx: ExtensionContext): string | undefined {
 		const entries = projection(ctx);
-		const total = tokensOf(entries.flatMap((e) => e.messages));
+		const total = contextTokens(ctx);
 		if (total < cfg.contextBudgetTokens) return undefined;
 		const work = total - run.startTokens;
 		if (cfg.nudgeUncompactedTokens > 0 && !run.compacted && !run.nudged && work >= cfg.nudgeUncompactedTokens) {
@@ -1418,7 +1441,7 @@ export default function (pi: ExtensionAPI) {
 
 	function updateStatus(ctx: ExtensionContext) {
 		if (!ctx.hasUI) return;
-		const tokens = projection(ctx).flatMap((e) => e.messages).reduce((n, m) => n + estimateTokens(m), 0);
+		const tokens = contextTokens(ctx);
 		ctx.ui.setStatus("ristretto", `context ~${Math.round(tokens / 1000)}k`);
 	}
 
@@ -1440,7 +1463,7 @@ export default function (pi: ExtensionAPI) {
 		if ((event as { messageType?: string }).messageType === "custom") return;
 		archiveFinished(ctx);
 		untrackedFrom = undefined;
-		run = { startTokens: tokensOf(projection(ctx).flatMap((e) => e.messages)), compacted: false, nudged: false, closeAsked: false, closing: false, closeTotal: 0 };
+		run = { startTokens: contextTokens(ctx), compacted: false, nudged: false, closeAsked: false, closing: false, closeTotal: 0 };
 	});
 
 	pi.registerCommand("todos", {
