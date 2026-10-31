@@ -28,7 +28,7 @@ Tags like `[#12]` are added to what the model sees: one per user request, one pe
 
 ### Reminders
 
-Once the context is over budget, the model is reminded to update the list or compact after a stretch of uncompacted work, and before a request ends when finished work is still in context. The reminders are hidden from the user.
+Below the budget the model only knows a short tool description: compact a failed attempt or superseded output so it can't mislead. Once the context is over budget, a hidden note gives the full instructions (what to compact when, what a handoff holds); it comes again if a compaction removed it. From then on the model is reminded to update the list or compact after a stretch of uncompacted work, and before a request ends when finished work is still in context. The reminders are hidden from the user.
 
 ## Install
 

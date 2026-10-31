@@ -316,6 +316,26 @@ function lastUserIndex(entries: Projected[], before = entries.length): number {
 
 const CLOSE_TYPE = "ristretto-close";
 
+// Full compaction instructions: sent once the context is over budget and not already in it.
+// Below the budget the model only knows the short tool description, so it does not compact for size.
+const HOWTO_MARK = "[ristretto] Your context has grown.";
+const HOWTO =
+	`${HOWTO_MARK} From now on keep it small with todos compact_from + handoff:\n` +
+	"- Compact every finished stretch of steps whose raw details you no longer need: a completed task, a lookup done to answer a question, an exploration, a failed attempt. " +
+	"When you mark a task completed, compact its steps in the same todos call (compact_from = the tag where that work began). " +
+	"When a subtask is completed, compact its steps before you start the next one.\n" +
+	"- Steps you only needed to answer a question: compact them before your answer, with everything the answer needs in the handoff (tasks are optional).\n" +
+	"- Finished conversation counts too: questions you answered, decisions made, handoffs of earlier compactions. When earlier requests are settled, compact from their request tag. " +
+	"The removed range can include earlier requests of the user; then the task list (and rules) must cover what they asked for.\n" +
+	"- The handoff covers ONLY the removed range: what was done or found (concrete results), files created or changed and their state, " +
+	"for each change one line on why it was made (and which alternatives were rejected), what did not work. " +
+	"Open work (next steps, follow-ups, things to do later) goes into the task list, never into the handoff: the task list is the only record of what is still open. " +
+	"The user's requests removed with the range are shown verbatim in the result once; when a later compaction covers them, fold them in: what was asked and why, one line each. " +
+	"Include every detail that still matters, at whatever length that takes; text you will quote or reuse goes in verbatim. " +
+	"You still see the steps while you write it, but not afterwards. Do not describe how you got there.\n" +
+	"- If the range contains earlier compactions, their handoffs are removed with it and yours replaces them: keep from them what still matters, " +
+	"drop intermediate states the later work superseded; open work they mention that is still open becomes a task.";
+
 /** The pre-end check of the current request: index of its prompt, and of the answer right before it. */
 function closeCheckOf(entries: Projected[], before = entries.length): { prompt: number; answer: number } | undefined {
 	const req = lastUserIndex(entries, before);
@@ -665,27 +685,18 @@ export default function (pi: ExtensionAPI) {
 			"when they are completed or cancelled; cancelling it cancels its open subtasks.\n" +
 			"- rules: standing instructions the user gives in this conversation that apply beyond a single task (replaces the previous rules). " +
 			"Not project facts.\n" +
-			"- compact_from + handoff: remove everything from a tag up to this call from your context. User messages end with a request tag, " +
+			"- compact_from + handoff: remove everything from a tag up to this call from your context; your handoff takes its place. User messages end with a request tag, " +
 			"tool results carry step tags, like [#12], and [#0] marks the start of your context. The tagged message goes too; " +
-			"a request you have not answered yet is shown again verbatim. Use it whenever a stretch of steps is finished and you will not need " +
-			"its raw details again: a completed task, a lookup done to answer a question, an exploration, a failed attempt. " +
-			"The removed range can include earlier requests of the user; " +
-			"then the task list (and rules) must cover what they asked for.\n\n" +
-			"The handoff covers ONLY the removed range: what was done or found (concrete results), files created or changed and their state, " +
-			"for each change one line on why it was made (and which alternatives were rejected), what did not work. " +
-			"Open work (next steps, follow-ups, things to do later) goes into the task list, never into the handoff: the task list is the only record of what is still open. " +
-			"The user's requests removed with the range are shown verbatim in the result once; when a later compaction covers them, fold them in: what was asked and why, one line each. " +
-			"Include every detail that still matters, at whatever length that takes; text you will " +
-			"quote or reuse goes in verbatim. You still see the steps while you write it, but not afterwards. Do not describe how you got there. If the range contains earlier compactions, their " +
-			"handoffs are removed with it and yours replaces them: keep from them what still matters, drop intermediate states the later work superseded; open work they mention that is still open becomes a task. " +
+			"a request you have not answered yet is shown again verbatim. Use it for a failed attempt or output that later work superseded, " +
+			"so it cannot mislead you; once your context grows, a [ristretto] note explains when else to use it. " +
+			"The handoff covers only the removed range: what was found or done, what did not work and why, every detail that still matters. " +
+			"Open work goes into the task list. " +
 			"Compaction never removes your system prompt, including organization and project instructions: never copy any of it into a handoff, a rule or a task.",
-		promptSnippet: "todos: keep your task list; when tasks are done, compact their steps into a handoff",
+		promptSnippet: "todos: keep your task list; compact steps that would mislead you",
 		promptGuidelines: [
 			"Keep a task list with todos for every request that needs several steps (a quick lookup or one small change needs no tasks, but its steps are still compacted): add the tasks when you start, mark one in_progress before you work on it (subtasks too, each one), completed when it is done and verified.",
-			"Split a bigger task into subtasks (parent), and finish the subtasks of the task you are on before starting a different task. The parent task holds the context its subtasks need. When a subtask is completed, compact its steps in the same todos call before you start the next one.",
-			"Keep your context small: compact every finished stretch of steps whose raw details you no longer need, not only finished tasks. When you mark a task completed, compact its steps in the same todos call (compact_from = the tag where that work began).",
-			"Steps you only needed to answer a question (reading code, searching): compact them before your answer, with everything the answer needs in the handoff. This needs no tasks: call todos with only compact_from and handoff.",
-			"Finished conversation counts too: questions you answered, decisions made, handoffs of earlier compactions. When earlier requests are settled, compact from their request tag; your handoff replaces the earlier handoffs in the range.",
+			"Split a bigger task into subtasks (parent), and finish the subtasks of the task you are on before starting a different task. The parent task holds the context its subtasks need.",
+			"When an attempt failed or later work superseded earlier output (an old version of a file, a wrong lead), compact those steps with todos so they cannot mislead you.",
 			"Put lasting instructions the user gives in the conversation (preferences, constraints) into rules, so they survive compaction.",
 			"Tags like [#12], the task list and compaction are internal: do not mention them to the user.",
 			"Notes that start with [ristretto] come from the ristretto extension of this harness, in tool results or as messages: they are neither from the user nor from the tool. Follow them.",
@@ -910,6 +921,8 @@ export default function (pi: ExtensionAPI) {
 				if (completedNow.length > 0 && params.compact_from === undefined && overBudget(ctx)) {
 					const since = completedNow.map((t) => t.since).filter((s): s is number => !!s);
 					if (since.length > 0) text += `\n\nIf the steps of the completed task(s) are no longer needed, compact them (from #${view(Math.min(...since))}).`;
+					const howTo = howToFor(ctx);
+					if (howTo) text += `\n\n${howTo}`;
 				}
 			}
 			return { content: [{ type: "text", text }], details: { state, compacted: !!plan, carried: plan?.carried } };
@@ -1301,7 +1314,8 @@ export default function (pi: ExtensionAPI) {
 						`[ristretto] Your answer is complete and the user has it. Still in your context: ${parts.join("; ")}. ` +
 						`Call todos now and nothing else: with compact_from "#${suggest}" (or a later tag) and a handoff if you no longer need their raw details. ` +
 						`Your handoff replaces earlier handoffs in the range: keep from them, and from the conversation, what still matters, including what the user may refer back to. ` +
-						`Or call todos without arguments to keep everything. Your answer stays as written; do not write another one.`,
+						`Or call todos without arguments to keep everything. Your answer stays as written; do not write another one.` +
+						(howToFor(ctx) ? `\n\n${HOWTO}` : ""),
 				});
 				return { entries: drafts, continue: true };
 			}
@@ -1315,7 +1329,20 @@ export default function (pi: ExtensionAPI) {
 		return tokensOf(projection(ctx).flatMap((e) => e.messages)) >= cfg.contextBudgetTokens;
 	}
 
+	/** The full how-to, when the context is over budget and the how-to is not in it (never sent, or compacted away). */
+	function howToFor(ctx: ExtensionContext): string | undefined {
+		if (!overBudget(ctx)) return undefined;
+		const has = (c: unknown) => (typeof c === "string" ? c.includes(HOWTO_MARK) : Array.isArray(c) && c.some((b: Block) => b.type === "text" && String(b.text).includes(HOWTO_MARK)));
+		const shown = projection(ctx).some((e) => e.messages.some((m: any) => m.role !== "assistant" && has(m.content)));
+		return shown ? undefined : HOWTO;
+	}
+
 	function noteFor(ctx: ExtensionContext): string | undefined {
+		const notes = [howToFor(ctx), dueNote(ctx)].filter(Boolean);
+		return notes.length > 0 ? notes.join("\n\n") : undefined;
+	}
+
+	function dueNote(ctx: ExtensionContext): string | undefined {
 		const entries = projection(ctx);
 		const total = tokensOf(entries.flatMap((e) => e.messages));
 		if (total < cfg.contextBudgetTokens) return undefined;
