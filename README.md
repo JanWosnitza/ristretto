@@ -33,7 +33,9 @@ The model is reminded to update the list or compact after a stretch of uncompact
 ## Install
 
 ```bash
-pi install /path/to/ristretto
+pi install git:github.com/JanWosnitza/ristretto
+# or from a local clone
+pi install ./ristretto
 ```
 
 or add the folder to `packages` in `~/.pi/agent/settings.json`. Restart pi afterwards.
