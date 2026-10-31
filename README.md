@@ -40,10 +40,6 @@ pi install ./ristretto
 
 or add the folder to `packages` in `~/.pi/agent/settings.json`. Restart pi afterwards.
 
-### With `pi-claude-subscription` (claude-sdk)
-
-Context edits need provider support for resuming after edited history. This is fixed in [pi-claude-subscription PR #4](https://github.com/jkeskikangas/pi-claude-subscription/pull/4). Until it's released, use the branch from that PR.
-
 ## Commands
 
 | Command | Description |
