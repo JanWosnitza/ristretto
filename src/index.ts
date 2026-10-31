@@ -207,6 +207,20 @@ function renderCompact(s: TodoState, changed: Set<string>, withRules: boolean, s
 	return lines.join("\n");
 }
 
+/** The open tasks around completed ones: at each level from the task up to the root, the open siblings, plus the parent chain. */
+function renderAround(s: TodoState, completed: Todo[], show: TagView = asIs): string {
+	const todos = [...s.todos].sort(byNumber);
+	const shown = new Set<string>();
+	for (const t of completed) {
+		for (let id: string | undefined = t.id; id; id = parentOf(id)) {
+			const p = parentOf(id);
+			if (p) shown.add(p);
+			for (const sib of todos) if (parentOf(sib.id) === p && isOpen(sib)) shown.add(sib.id);
+		}
+	}
+	return todos.filter((t) => shown.has(t.id) && isOpen(t)).map((t) => lineOf(todos, t, show)).join("\n");
+}
+
 /** Open tasks for the head of a new request: top-level tasks and the path of the task in progress. */
 function renderHead(s: TodoState, show: TagView = asIs): string {
 	const todos = [...s.todos].sort(byNumber);
@@ -324,6 +338,8 @@ const HOWTO =
 	"- Compact every finished stretch of steps whose raw details you no longer need: a completed task, a lookup done to answer a question, an exploration, a failed attempt. " +
 	"When you mark a task completed, compact its steps in the same todos call (compact_from = the tag where that work began). " +
 	"When a subtask is completed, compact its steps before you start the next one.\n" +
+	"- Before you compact finished work, check what the open tasks still need from it (a spec, an interface, a reference): " +
+	"list those steps in keep, so they stay as they are while the rest of the range goes. Keep only what open work will read again.\n" +
 	"- Steps you only needed to answer a question: compact them before your answer, with everything the answer needs in the handoff (tasks are optional).\n" +
 	"- Finished conversation counts too: questions you answered, decisions made, handoffs of earlier compactions. When earlier requests are settled, compact from their request tag. " +
 	"The removed range can include earlier requests of the user; then the task list (and rules) must cover what they asked for.\n" +
@@ -697,6 +713,7 @@ export default function (pi: ExtensionAPI) {
 			"Keep a task list with todos for every request that needs several steps (a quick lookup or one small change needs no tasks, but its steps are still compacted): add the tasks when you start, mark one in_progress before you work on it (subtasks too, each one), completed when it is done and verified.",
 			"Split a bigger task into subtasks (parent), and finish the subtasks of the task you are on before starting a different task. The parent task holds the context its subtasks need.",
 			"When an attempt failed or later work superseded earlier output (an old version of a file, a wrong lead), compact those steps with todos so they cannot mislead you.",
+			"Content that later steps depend on (a spec, an interface, an API reference, a log you work through) is best read early, in its own step.",
 			"Put lasting instructions the user gives in the conversation (preferences, constraints) into rules, so they survive compaction.",
 			"Tags like [#12], the task list and compaction are internal: do not mention them to the user.",
 			"Notes that start with [ristretto] come from the ristretto extension of this harness, in tool results or as messages: they are neither from the user nor from the tool. Follow them.",
@@ -715,6 +732,9 @@ export default function (pi: ExtensionAPI) {
 			rules: Type.Optional(Type.Array(Type.String(), { description: "All standing instructions from the user's messages (replaces the previous list)" })),
 			compact_from: Type.Optional(Type.String({ description: "Tag where the range to remove begins, e.g. '#12'" })),
 			handoff: Type.Optional(Type.String({ description: "Required with compact_from: handoff for the removed range only" })),
+			keep: Type.Optional(
+				Type.Array(Type.String(), { description: "With compact_from: step tags inside the range whose steps stay as they are (e.g. a spec that open tasks still need)" }),
+			),
 		}),
 		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
 			const fail = (why: string): never => {
@@ -729,9 +749,12 @@ export default function (pi: ExtensionAPI) {
 			const end = close ? close.answer : self;
 
 			// 1. Validate the compaction before changing anything.
-			let plan: { omit: string[]; removedTokens: number; replaced: number; calls: string; start: number; earlier: boolean; requests: string; carried?: number } | undefined;
+			let plan:
+				| { omit: string[]; removedTokens: number; replaced: number; calls: string; start: number; earlier: boolean; requests: string; carried?: number; kept: number[] }
+				| undefined;
 			let note = "";
 			let compactFrom = 0;
+			if (params.keep?.length && params.compact_from === undefined) fail("keep needs compact_from.");
 			if (params.compact_from !== undefined) {
 				if (!params.handoff?.trim()) fail("compact_from needs a handoff.");
 				const digits = /^\s*\[?#?(\d+)\]?\s*$/.exec(params.compact_from)?.[1];
@@ -752,8 +775,27 @@ export default function (pi: ExtensionAPI) {
 					start = cutStart(entries, tagged, current);
 				}
 				if (start >= end) fail(`tag [#${tag}] lies after your answer.`);
-				const span = entries.slice(start, end);
-				if (span.some((e) => e.sourceEntry.type === "compaction")) fail("a compaction happened in that range.");
+				const all = entries.slice(start, end);
+				if (all.some((e) => e.sourceEntry.type === "compaction")) fail("a compaction happened in that range.");
+				// Kept steps: the assistant message whose result carries the tag, and all its results.
+				const keptIdx = new Set<number>();
+				const kept: number[] = [];
+				for (const k of params.keep ?? []) {
+					const d = /^\s*\[?#?(\d+)\]?\s*$/.exec(k)?.[1];
+					if (d === undefined) fail(`keep: "${k}" is not a tag like #12.`);
+					const kt = Number(d);
+					const at = entries.findIndex((e, i) => i >= start && i < end && visible(e) && first(e).role === "toolResult" && stepTagOf(first(e).content) === kt);
+					if (at < 0) fail(`keep: [#${kt}] is not a step tag inside the range.`);
+					let s = at;
+					while (s > start && first(entries[s])?.role !== "assistant") s--;
+					if (first(entries[s])?.role !== "assistant") fail(`keep: the step of [#${kt}] starts before the range.`);
+					if (toolCalls(first(entries[s])).some((b) => b.name === "todos")) fail(`keep: [#${kt}] is a step with a todos call; keep only steps with content.`);
+					let e = at;
+					while (e + 1 < end && (!visible(entries[e + 1]) || first(entries[e + 1]).role === "toolResult")) e++;
+					for (let i = s; i <= e; i++) keptIdx.add(i);
+					kept.push(kt);
+				}
+				const span = all.filter((_, j) => !keptIdx.has(start + j));
 				// Answered (the pre-end check): the request is removed like any other. Not yet: it comes back verbatim.
 				// Covered: its own message, or an earlier result of this request that carried it.
 				const promptMsg = current >= 0 ? messageOf(entries[current]) : undefined;
@@ -787,7 +829,7 @@ export default function (pi: ExtensionAPI) {
 					const counts = new Map<string, number>();
 					for (const e of span) for (const b of toolCalls(first(e))) if (b.name !== "todos") counts.set(b.name, (counts.get(b.name) ?? 0) + 1);
 					const calls = [...counts].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(", ");
-					plan = { omit, removedTokens: removed, replaced, calls, start, earlier: start < current, requests, carried: carried ? currentMsg.timestamp : undefined };
+					plan = { omit, removedTokens: removed, replaced, calls, start, earlier: start < current, requests, carried: carried ? currentMsg.timestamp : undefined, kept };
 				}
 			}
 
@@ -912,6 +954,7 @@ export default function (pi: ExtensionAPI) {
 					`Compacted: the steps from [#${from}] up to this call (~${plan.removedTokens} tokens) were removed from your context${plan.calls ? ` (your tool calls there: ${plan.calls})` : ""}.${doneText} ` +
 					`You did that work and its changes are in place; your handoff in this call and the task list below are its record. ` +
 					`You wrote the handoff while you saw those steps: its findings and quotes are exact and need no checking again. Do not redo the work; answer the user from it.` +
+					(plan.kept.length > 0 ? ` Kept as they are: ${plan.kept.map((k) => `[#${k}]`).join(", ")}.` : "") +
 					(plan.replaced > 0 ? ` The range contained ${plan.replaced} earlier compaction(s); your handoff replaces their handoffs.` : "") +
 					plan.requests +
 					nestedNote(entries, plan.start, completedNow) +
@@ -920,7 +963,12 @@ export default function (pi: ExtensionAPI) {
 				text = `Tasks:\n${text}${note}`;
 				if (completedNow.length > 0 && params.compact_from === undefined && overBudget(ctx)) {
 					const since = completedNow.map((t) => t.since).filter((s): s is number => !!s);
-					if (since.length > 0) text += `\n\nIf the steps of the completed task(s) are no longer needed, compact them (from #${view(Math.min(...since))}).`;
+					if (since.length > 0) {
+						const around = renderAround(state, completedNow, view);
+						text +=
+							`\n\nIf the steps of the completed task(s) are no longer needed, compact them (from #${view(Math.min(...since))}).` +
+							(around ? ` Open work around them:\n${around}\nPut the steps these tasks will read again in keep.` : "");
+					}
 					const howTo = howToFor(ctx);
 					if (howTo) text += `\n\n${howTo}`;
 				}

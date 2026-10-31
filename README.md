@@ -9,7 +9,7 @@ Like the coffee: same content, less water. The model works through a task list. 
 The extension adds one tool, `todos`, which does two things:
 
 - **Task list:** the model adds tasks, marks them in progress or done, and keeps a list of standing rules from the user. The list is shown above the editor.
-- **Compaction:** the same call can remove a stretch of finished work. The model names where the stretch starts with a tag, and writes a handoff that records what was done, what changed and why.
+- **Compaction:** the same call can remove a stretch of finished work. The model names where the stretch starts with a tag, and writes a handoff that records what was done, what changed and why. Steps inside the stretch that open tasks still need (a spec, an interface) can be listed in `keep`: they stay as they are while the rest goes. When a task is completed, ristretto shows the open tasks around it so the model can decide what to keep.
 
 Tags like `[#12]` are added to what the model sees: one per user request, one per step (tool result), and `[#0]` for the start of the context. The model copies a tag to say where a cut begins, so it never has to count messages.
 
