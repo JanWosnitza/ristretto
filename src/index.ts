@@ -42,8 +42,6 @@ interface Config {
 	/** Side panel: width in columns, and the terminal width below which it falls back to "above". */
 	sideWidth: number;
 	sideMinTerminalWidth: number;
-	/** Expected further requests that would re-read removed content, for the savings estimate. */
-	expectedFutureRequests: number;
 	/** Cache write price as a multiple of base input (2 for the 1h TTL Claude Code uses, 1.25 for 5m). */
 	cacheWriteMultiplier: number;
 	/** Write one JSON line per request with its usage, and one per compaction. */
@@ -66,7 +64,6 @@ const DEFAULTS: Config = {
 	todoPanel: "above",
 	sideWidth: 36,
 	sideMinTerminalWidth: 120,
-	expectedFutureRequests: 10,
 	cacheWriteMultiplier: 2,
 	log: true,
 	recallModel: "",
@@ -100,12 +97,6 @@ function prices(ctx: ExtensionContext, cfg: Config) {
 		cacheRead: cost.cacheRead > 0 ? cost.cacheRead : input * 0.1,
 		cacheWrite: input * cfg.cacheWriteMultiplier,
 	};
-}
-
-/** Cache read price as a fraction of base input, from the model (0.05 on the 5.5 models), else 0.1. */
-function readRatio(ctx: ExtensionContext): number {
-	const cost = (ctx.model as any)?.cost ?? {};
-	return cost.input > 0 && cost.cacheRead > 0 ? cost.cacheRead / cost.input : 0.1;
 }
 
 const perTok = (perMTok: number) => perMTok / 1_000_000;
@@ -284,29 +275,6 @@ function currentRequest(m: any, tags: Map<number, number>): string {
 	return `\n\nTHE REQUEST YOU ARE WORKING ON, verbatim. It is not answered yet: answer it. It is shown again after every compaction until you answer.\n${tag ? `[#${tag}] ` : ""}${text}`;
 }
 
-/** Tokens a cut starting at `start` makes the cache write again: the cache can only continue after the last assistant
- * message before the cut, so every kept message from there up to `end` is new to it. */
-function rewriteTokens(entries: Projected[], start: number, removed: Set<Projected>, end: number): number {
-	let anchor = start - 1;
-	while (anchor >= 0 && first(entries[anchor])?.role !== "assistant") anchor--;
-	return tokensOf(entries.slice(anchor + 1, end).filter((e) => visible(e) && !removed.has(e)).flatMap((e) => e.messages));
-}
-
-/** Output costs this many times base input (Claude models: 5x). */
-const OUTPUT_MULTIPLIER = 5;
-
-/**
- * A cut pays when the reads it saves in later calls outweigh writing the rewritten part once. `unwritten` is a handoff
- * that does not exist yet (the nudge): it costs output, a cache write and reads. A handoff already written is in the
- * context either way, so it does not count.
- */
-function cutPays(cfg: Config, removed: number, rewrite: number, unwritten = 0, read = 0.1): boolean {
-	return (
-		(removed - unwritten) * read * cfg.expectedFutureRequests >
-		(rewrite + unwritten) * cfg.cacheWriteMultiplier + unwritten * OUTPUT_MULTIPLIER
-	);
-}
-
 /** A projected entry's message, also for omitted entries (the projection lists them without messages). */
 const messageOf = (e: Projected | undefined) => first(e) ?? (e?.sourceEntry.type === "message" ? e.sourceEntry.message : undefined);
 
@@ -359,7 +327,7 @@ const REQUEST_TAG_TYPE = "ristretto-request-tag";
 const ANSWER_NOTE_TYPE = "ristretto-answer-note";
 
 // For tests.
-export { cutPays, cutStart, DEFAULTS, isType, removedRequests, renderCompact, renderList, stepTagOf };
+export { cutStart, DEFAULTS, isType, removedRequests, renderCompact, renderList, stepTagOf };
 
 // ---- extension ---------------------------------------------------------------------------------
 
@@ -791,7 +759,6 @@ export default function (pi: ExtensionAPI) {
 				const others = [...answered, ...span.filter((e) => e !== entries[current]).map(first)];
 				const requests = removedRequests(close && currentMsg ? [...others, currentMsg] : others, requestTags) + carried;
 				const removed = tokensOf(span.flatMap((e) => e.messages));
-				let rewrite = 0;
 				// A recall result is looked up to answer this request: removing it before the answer turns an
 				// exact quote back into a paraphrase.
 				const recallNow = entries.slice(Math.max(start, current + 1), self).some((e) => first(e)?.role === "toolResult" && first(e).toolName === "recall");
@@ -799,8 +766,6 @@ export default function (pi: ExtensionAPI) {
 					note = "\n\nNot compacted: the range contains a recall result from this request. Answer the user from it; it is removed automatically after your answer.";
 				} else if (removed < cfg.minCompactTokens) {
 					note = `\n\nNot compacted: only ~${removed} tokens would be removed. Continue normally.`;
-				} else if (!cutPays(cfg, removed, (rewrite = rewriteTokens(entries, start, new Set(span), end) + Math.ceil(requests.length / 4)), 0, readRatio(ctx))) {
-					note = `\n\nNot compacted: removing ~${removed} tokens from [#${tag}] would make the cache write ~${rewrite} kept tokens again, which costs more than it saves. A later tag, right after an answer, is cheaper.`;
 				} else {
 					const omit = span.filter(visible).map((e) => e.sourceEntry.id);
 					// Earlier compactions in the range go with it; the new handoff replaces theirs.
@@ -1229,8 +1194,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			stats.compactions++;
 			stats.removedTokens += plan.removedTokens;
-			const p = prices(ctx, cfg);
-			log(ctx, { kind: "compact", removedTokens: plan.removedTokens, estSaving: plan.removedTokens * perTok(p.cacheRead) * cfg.expectedFutureRequests });
+			log(ctx, { kind: "compact", removedTokens: plan.removedTokens });
 		}
 
 		if (drafts.length > 0) {
@@ -1297,14 +1261,11 @@ export default function (pi: ExtensionAPI) {
 			const earlier = entries.slice(base, start).filter(keep);
 			const settled = [...earlier, ...entries.slice(start + 1, from).filter(keep)];
 			const settledTokens = tokensOf(settled.flatMap((e) => e.messages));
-			// A cut from a tag up to the answer: does it pay, counting what the cache has to write again?
+			// A cut from a tag up to the answer: it has to remove at least minCompactTokens.
 			const pays = (i: number) => {
 				if (i < 0 || i >= last) return false;
-				const span = new Set(entries.slice(i, last).filter((x, j) => keep(x) && i + j !== start));
-				const removed = tokensOf([...span].flatMap((x) => x.messages));
-				// Removed requests come back verbatim in the result.
-				const requests = Math.ceil(removedRequests([...span].map(first), requestTags).length / 4);
-				return cutPays(cfg, removed, rewriteTokens(entries, i, span, last) + requests, Math.min(1500, Math.max(200, Math.ceil(removed / 5))), readRatio(ctx));
+				const span = entries.slice(i, last).filter((x, j) => keep(x) && i + j !== start);
+				return tokensOf(span.flatMap((x) => x.messages)) >= cfg.minCompactTokens;
 			};
 			const startOf = (e: Projected | undefined) => (e ? cutStart(entries, entries.indexOf(e), start) : -1);
 			const candidates = [...(earlier.length > 0 ? [{ tag: 0, at: base }] : []), ...settled.filter((e) => tagOf(e) !== undefined).map((e) => ({ tag: tagOf(e)!, at: startOf(e) }))];

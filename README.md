@@ -17,7 +17,7 @@ Tags like `[#12]` are added to what the model sees: one per user request, one pe
 
 - Cuts fall between whole messages, never inside one.
 - Everything before a cut stays byte-identical, so it is still a prompt cache hit. Only the new tail (handoff plus later messages) is written again.
-- A compaction is only accepted when it pays off: the removed range has to be large enough (`minCompactTokens`) and clearly bigger than the handoff that replaces it.
+- A compaction is only accepted when the removed range is large enough (`minCompactTokens`), so small steps are batched into one cut instead of each paying for its own handoff. There is no further cost check: every request gets compacted sooner or later, so cutting now costs the same as cutting later and saves the reads in between.
 
 ### Nothing gets lost
 
@@ -63,7 +63,6 @@ Options are stored in `~/.pi/agent/ristretto.json`. Only values that differ from
 | `todoPanel` | `above` | Where the task list is shown: `above`, `below`, `side` or `off` |
 | `sideWidth` | 36 | Width of the side panel in columns |
 | `sideMinTerminalWidth` | 120 | Below this terminal width the side panel falls back to `above` |
-| `expectedFutureRequests` | 10 | Expected further requests that would re-read removed content, used to estimate savings |
 | `cacheWriteMultiplier` | 2 | Cache write price as a multiple of base input (2 for the 1h TTL, 1.25 for 5m) |
 | `log` | true | Write usage and compactions to `~/.pi/agent/ristretto/log.jsonl` |
 | `recallModel` | (empty) | Helper model for `recall` as `provider/id`. Empty means the newest Haiku of the current provider |

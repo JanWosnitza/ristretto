@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cutPays, cutStart, DEFAULTS, isType, removedRequests, renderCompact, renderList, stepTagOf } from "../src/index.ts";
+import { cutStart, DEFAULTS, isType, removedRequests, renderCompact, renderList, stepTagOf } from "../src/index.ts";
 
 const text = (t: string) => ({ type: "text", text: t });
 
@@ -14,17 +14,6 @@ test("isType accepts the old context-rewind names", () => {
 	assert.ok(isType("ristretto-close", "ristretto-close"));
 	assert.ok(isType("context-rewind-close", "ristretto-close"));
 	assert.ok(!isType("other-close", "ristretto-close"));
-});
-
-test("cutPays: big removals pay, small ones next to a big rewrite do not", () => {
-	assert.ok(cutPays(DEFAULTS, 10_000, 500));
-	assert.ok(!cutPays(DEFAULTS, 1_000, 1_000));
-	// An unwritten handoff costs output and a write on top.
-	assert.ok(cutPays(DEFAULTS, 3_000, 0, 0));
-	assert.ok(!cutPays(DEFAULTS, 3_000, 0, 1_000));
-	// Cheaper reads (5.5 models: 5% of input) save less.
-	assert.ok(cutPays(DEFAULTS, 2_000, 700));
-	assert.ok(!cutPays(DEFAULTS, 2_000, 700, 0, 0.05));
 });
 
 test("renderList shows open tasks, folds finished ones, lists rules", () => {
