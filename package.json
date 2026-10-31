@@ -2,6 +2,7 @@
   "name": "ristretto",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "pi extension that lets the model compact finished work out of its own context, cache-friendly.",
   "keywords": ["pi-package", "pi", "pi-extension"],
   "type": "module",

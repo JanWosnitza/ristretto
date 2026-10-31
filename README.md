@@ -74,3 +74,7 @@ Options are stored in `~/.pi/agent/ristretto.json`. Only values that differ from
 
 - After a compaction the model may read a file again that it had already read before the cut.
 - Writing the handoff costs output tokens. The profit check keeps this to compactions that are worth it.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
