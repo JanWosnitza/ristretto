@@ -9,8 +9,20 @@
   "pi": {
     "extensions": ["./src/index.ts"]
   },
+  "scripts": {
+    "check": "tsc -p .",
+    "test": "node --test test/"
+  },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=1.0.0",
-    "@earendil-works/pi-tui": ">=1.0.0"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@earendil-works/pi-tui": "^1.4.0",
+    "@types/node": "^26.6.6",
+    "typebox": "^1.4.3",
+    "typescript": "^7.0.2"
   }
 }

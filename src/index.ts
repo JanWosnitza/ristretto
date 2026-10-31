@@ -352,6 +352,9 @@ function closeCheckOf(entries: Projected[], before = entries.length): { prompt: 
 const REQUEST_TAG_TYPE = "ristretto-request-tag";
 const ANSWER_NOTE_TYPE = "ristretto-answer-note";
 
+// For tests.
+export { cutPays, cutStart, DEFAULTS, isType, removedRequests, renderCompact, renderList, stepTagOf };
+
 // ---- extension ---------------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
