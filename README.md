@@ -17,7 +17,7 @@ Tags like `[#12]` are added to what the model sees: one per user request, one pe
 
 - Cuts fall between whole messages, never inside one.
 - Everything before a cut stays byte-identical, so it is still a prompt cache hit. Only the new tail (handoff plus later messages) is written again.
-- A compaction is only accepted when the removed range is large enough (`minCompactTokens`), so small steps are batched into one cut instead of each paying for its own handoff. There is no further cost check: every request gets compacted sooner or later, so cutting now costs the same as cutting later and saves the reads in between.
+- A compaction is only accepted when the removed range is large enough (`minCompactTokens`), so small steps are batched into one cut instead of each paying for its own handoff. Below a context budget (`contextBudgetTokens`) ristretto asks for no compaction at all: a small context is cheap to read, and every cut risks the model reading a removed file again.
 
 ### Nothing gets lost
 
@@ -28,7 +28,7 @@ Tags like `[#12]` are added to what the model sees: one per user request, one pe
 
 ### Reminders
 
-The model is reminded to update the list or compact after a stretch of uncompacted work, and before a request ends when finished work is still in context. The reminders are hidden from the user.
+Once the context is over budget, the model is reminded to update the list or compact after a stretch of uncompacted work, and before a request ends when finished work is still in context. The reminders are hidden from the user.
 
 ## Install
 
@@ -54,6 +54,7 @@ Options are stored in `~/.pi/agent/ristretto.json`. Only values that differ from
 
 | Option | Default | Description |
 |---|---|---|
+| `contextBudgetTokens` | 40000 | Below this context size no compaction is asked for (0 = always ask) |
 | `minCompactTokens` | 800 | Smallest range a compaction may remove |
 | `reminderEveryTokens` | 25000 | Remind the model to compact after this many tokens since the last compaction (0 = off) |
 | `nudgeUncompactedTokens` | 2000 | Once per request, ask for the task list after this much tool work without a `todos` call (0 = off) |

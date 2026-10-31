@@ -25,6 +25,8 @@ import { Type } from "typebox";
 // ---- configuration --------------------------------------------------------------------------
 
 interface Config {
+	/** Below this context size (message tokens) ristretto asks for no compaction: no end check, nudge, reminder or hint. 0 = always ask. */
+	contextBudgetTokens: number;
 	/** Smallest span (tokens) a compaction may remove. */
 	minCompactTokens: number;
 	/** Remind the model to compact after this many tokens since the last compaction. 0 disables. */
@@ -55,6 +57,7 @@ interface Config {
 }
 
 const DEFAULTS: Config = {
+	contextBudgetTokens: 40_000,
 	minCompactTokens: 800,
 	reminderEveryTokens: 25_000,
 	nudgeUncompactedTokens: 2_000,
@@ -904,7 +907,7 @@ export default function (pi: ExtensionAPI) {
 					`\n\nTasks:\n${text}`;
 			} else {
 				text = `Tasks:\n${text}${note}`;
-				if (completedNow.length > 0 && params.compact_from === undefined) {
+				if (completedNow.length > 0 && params.compact_from === undefined && overBudget(ctx)) {
 					const since = completedNow.map((t) => t.since).filter((s): s is number => !!s);
 					if (since.length > 0) text += `\n\nIf the steps of the completed task(s) are no longer needed, compact them (from #${view(Math.min(...since))}).`;
 				}
@@ -1240,7 +1243,7 @@ export default function (pi: ExtensionAPI) {
 		const last = entries.length - 1;
 		const answer = first(entries[last]);
 		const isAnswer = answer?.role === "assistant" && toolCalls(answer).length === 0 && (answer.content as Block[]).some((b) => b.type === "text" && String(b.text).trim());
-		if (cfg.checkBeforeEnd && !run.closeAsked && event.outcome === "completed" && isAnswer) {
+		if (cfg.checkBeforeEnd && !run.closeAsked && event.outcome === "completed" && isAnswer && overBudget(ctx)) {
 			const dropped = new Set(drafts.map((d) => d.targetId));
 			const keep = (e: Projected) => visible(e) && !dropped.has(e.sourceEntry.id);
 			const tagOf = (e: Projected) => {
@@ -1308,9 +1311,14 @@ export default function (pi: ExtensionAPI) {
 
 	// Nudge and reminder ride on a tool result: a separate message reaches Claude Code as a message from the user,
 	// which the model rightly distrusts. The guideline names the source of [ristretto] notes.
+	function overBudget(ctx: ExtensionContext): boolean {
+		return tokensOf(projection(ctx).flatMap((e) => e.messages)) >= cfg.contextBudgetTokens;
+	}
+
 	function noteFor(ctx: ExtensionContext): string | undefined {
 		const entries = projection(ctx);
 		const total = tokensOf(entries.flatMap((e) => e.messages));
+		if (total < cfg.contextBudgetTokens) return undefined;
 		const work = total - run.startTokens;
 		if (cfg.nudgeUncompactedTokens > 0 && !run.compacted && !run.nudged && work >= cfg.nudgeUncompactedTokens) {
 			run.nudged = true;
