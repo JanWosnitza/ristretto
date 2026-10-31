@@ -750,7 +750,7 @@ export default function (pi: ExtensionAPI) {
 
 			// 1. Validate the compaction before changing anything.
 			let plan:
-				| { omit: string[]; removedTokens: number; replaced: number; calls: string; start: number; earlier: boolean; requests: string; carried?: number; kept: number[] }
+				| { omit: string[]; removedTokens: number; replaced: number; calls: string; start: number; earlier: boolean; requests: string; carried?: number; kept: number[]; keptTokens: number }
 				| undefined;
 			let note = "";
 			let compactFrom = 0;
@@ -829,7 +829,7 @@ export default function (pi: ExtensionAPI) {
 					const counts = new Map<string, number>();
 					for (const e of span) for (const b of toolCalls(first(e))) if (b.name !== "todos") counts.set(b.name, (counts.get(b.name) ?? 0) + 1);
 					const calls = [...counts].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(", ");
-					plan = { omit, removedTokens: removed, replaced, calls, start, earlier: start < current, requests, carried: carried ? currentMsg.timestamp : undefined, kept };
+					plan = { omit, removedTokens: removed, replaced, calls, start, earlier: start < current, requests, carried: carried ? currentMsg.timestamp : undefined, kept, keptTokens: tokensOf([...keptIdx].flatMap((i) => entries[i].messages)) };
 				}
 			}
 
@@ -954,7 +954,7 @@ export default function (pi: ExtensionAPI) {
 					`Compacted: the steps from [#${from}] up to this call (~${plan.removedTokens} tokens) were removed from your context${plan.calls ? ` (your tool calls there: ${plan.calls})` : ""}.${doneText} ` +
 					`You did that work and its changes are in place; your handoff in this call and the task list below are its record. ` +
 					`You wrote the handoff while you saw those steps: its findings and quotes are exact and need no checking again. Do not redo the work; answer the user from it.` +
-					(plan.kept.length > 0 ? ` Kept as they are: ${plan.kept.map((k) => `[#${k}]`).join(", ")}.` : "") +
+					(plan.kept.length > 0 ? ` Kept as they are (~${plan.keptTokens} tokens): ${plan.kept.map((k) => `[#${k}]`).join(", ")}.` : "") +
 					(plan.replaced > 0 ? ` The range contained ${plan.replaced} earlier compaction(s); your handoff replaces their handoffs.` : "") +
 					plan.requests +
 					nestedNote(entries, plan.start, completedNow) +
