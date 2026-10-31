@@ -17,7 +17,7 @@ Tags like `[#12]` are added to what the model sees: one per user request, one pe
 
 - Cuts fall between whole messages, never inside one.
 - Everything before a cut stays byte-identical, so it is still a prompt cache hit. Only the new tail (handoff plus later messages) is written again.
-- A compaction is only accepted when the removed range is large enough (`minCompactTokens`), so small steps are batched into one cut instead of each paying for its own handoff. Below a context budget (`contextBudgetTokens`) ristretto asks for no compaction at all: a small context is cheap to read, and every cut risks the model reading a removed file again.
+- A compaction is only accepted when the removed range is large enough (`minCompactTokens`), so small steps are batched into one cut instead of each paying for its own handoff. A compaction held back as too small is applied later without asking the model, at the first prompt after the prompt cache has expired (`cacheLifetime`): the next request writes the whole context to the cache anyway, so the cut is free then. Below a context budget (`contextBudgetTokens`) ristretto asks for no compaction at all: a small context is cheap to read, and every cut risks the model reading a removed file again.
 
 ### Nothing gets lost
 
@@ -64,7 +64,7 @@ Options are stored in `~/.pi/agent/ristretto.json`. Only values that differ from
 | `todoPanel` | `above` | Where the task list is shown: `above`, `below`, `side` or `off` |
 | `sideWidth` | 36 | Width of the side panel in columns |
 | `sideMinTerminalWidth` | 120 | Below this terminal width the side panel falls back to `above` |
-| `cacheLifetime` | `1h` | How long the provider keeps the prompt cache: `5m` or `1h` |
+| `cacheLifetime` | `1h` | How long the provider keeps the prompt cache: `5m` or `1h`. Held-back compactions are applied after a longer pause |
 | `log` | true | Write usage and compactions to `~/.pi/agent/ristretto/log.jsonl` |
 | `recallModel` | (empty) | Helper model for `recall` as `provider/id`. Empty means the newest Haiku of the current provider |
 | `recallMaxTokens` | 3000 | Most original text attached to a `recall` answer |

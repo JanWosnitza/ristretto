@@ -278,6 +278,17 @@ function currentRequest(m: any, tags: Map<number, number>): string {
 }
 
 /** A projected entry's message, also for omitted entries (the projection lists them without messages). */
+// Identifies a message in the context hook, which has no entry ids.
+const msgKey = (m: any) => (m.role === "toolResult" ? `r:${m.toolCallId}` : `${m.role}:${m.timestamp}`);
+
+// A compaction held back as too small: applied without the model once the prompt cache has expired.
+interface Deferred {
+	omit: string[];
+	keys: string[];
+	removedTokens: number;
+	text: string;
+}
+
 const messageOf = (e: Projected | undefined) => first(e) ?? (e?.sourceEntry.type === "message" ? e.sourceEntry.message : undefined);
 
 /** Where the context begins after pi's own last compaction: a cut may not cross it. */
@@ -370,6 +381,7 @@ export default function (pi: ExtensionAPI) {
 	const stats = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, compactions: 0, removedTokens: 0 };
 	/** The current run: context size at its start, and whether it compacted or the model was nudged. */
 	let usageGap = 0;
+	let cold: { omit: string[]; keys: Set<string>; results: Map<string, { id: string; text: string }>; removedTokens: number } | undefined;
 	let run = { startTokens: 0, compacted: false, nudged: false, closeAsked: false, closing: false, closeTotal: 0 };
 	/** First step tag of work done while no task was in progress (in this request, since the last compaction). */
 	let untrackedFrom: number | undefined;
@@ -588,9 +600,21 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("context", async (event) => {
 		let changed = false;
+		let source = event.messages;
+		// Cold-cache cuts of this request: saved as context edits at turn_end, until then applied here.
+		if (cold) {
+			const c = cold;
+			changed = true;
+			source = source
+				.filter((m: any) => !c.keys.has(msgKey(m)))
+				.map((m: any) => {
+					const r = m.role === "toolResult" ? c.results.get(m.toolCallId) : undefined;
+					return r ? { ...m, content: [{ type: "text", text: r.text }] } : m;
+				});
+		}
 		// [#0] marks where the context begins: at the end of pi's summary, or in front of the first message.
-		const start = event.messages.findIndex((m: any) => m.role !== "system");
-		const messages = event.messages.map((m: any, i: number) => {
+		const start = source.findIndex((m: any) => m.role !== "system");
+		const messages = source.map((m: any, i: number) => {
 			if (i === start && (m.role === "compactionSummary" || m.role === "branchSummary")) {
 				changed = true;
 				return { ...m, summary: `${m.summary}\n\n[#0]` };
@@ -741,6 +765,7 @@ export default function (pi: ExtensionAPI) {
 				| undefined;
 			let note = "";
 			let compactFrom = 0;
+			let deferred: Deferred | undefined;
 			if (params.keep?.length && params.compact_from === undefined) fail("keep needs compact_from.");
 			if (params.compact_from !== undefined) {
 				if (!params.handoff?.trim()) fail("compact_from needs a handoff.");
@@ -809,6 +834,16 @@ export default function (pi: ExtensionAPI) {
 					note = "\n\nNot compacted: the range contains a recall result from this request. Answer the user from it; it is removed automatically after your answer.";
 				} else if (removed < cfg.minCompactTokens) {
 					note = `\n\nNot compacted: only ~${removed} tokens would be removed. Continue normally.`;
+					// Held back while the cache is warm; applied without the model once it has expired.
+					const msgs = span.filter(visible).map(first);
+					if (!close && !requests && params.keep === undefined && msgs.every((m) => m.role === "assistant" || m.role === "toolResult")) {
+						deferred = {
+							omit: span.filter(visible).map((e) => e.sourceEntry.id),
+							keys: msgs.map(msgKey),
+							removedTokens: removed,
+							text: "",
+						};
+					}
 				} else {
 					const omit = span.filter(visible).map((e) => e.sourceEntry.id);
 					// Earlier compactions in the range go with it; the new handoff replaces theirs.
@@ -947,6 +982,11 @@ export default function (pi: ExtensionAPI) {
 					nestedNote(entries, plan.start, completedNow) +
 					`\n\nTasks:\n${text}`;
 			} else {
+				if (deferred) {
+					deferred.text =
+						`Tasks:\n${text}\n\nCompacted later, after the prompt cache had expired: the steps from [#${compactFrom}] up to this call (~${deferred.removedTokens} tokens) were removed from your context. ` +
+						`Your handoff in this call is their record; its findings are exact.`;
+				}
 				text = `Tasks:\n${text}${note}`;
 				if (completedNow.length > 0 && params.compact_from === undefined && overBudget(ctx)) {
 					const since = completedNow.map((t) => t.since).filter((s): s is number => !!s);
@@ -960,7 +1000,7 @@ export default function (pi: ExtensionAPI) {
 					if (howTo) text += `\n\n${howTo}`;
 				}
 			}
-			return { content: [{ type: "text", text }], details: { state, compacted: !!plan, carried: plan?.carried } };
+			return { content: [{ type: "text", text }], details: { state, compacted: !!plan, carried: plan?.carried, ...(deferred ? { deferred } : {}) } };
 		},
 	});
 
@@ -1256,6 +1296,13 @@ export default function (pi: ExtensionAPI) {
 			log(ctx, { kind: "compact", removedTokens: plan.removedTokens });
 		}
 
+		if (cold) {
+			for (const id of cold.omit) drafts.push({ type: "context_edit", targetId: id, replacement: null });
+			for (const r of cold.results.values()) drafts.push({ type: "context_edit", targetId: r.id, replacement: { content: [{ type: "text", text: r.text }] } });
+			stats.compactions += cold.results.size;
+			stats.removedTokens += cold.removedTokens;
+			cold = undefined;
+		}
 		if (drafts.length > 0) {
 			run.compacted = true;
 			lastReminder = 0;
@@ -1445,9 +1492,37 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus("ristretto", `context ~${Math.round(tokens / 1000)}k`);
 	}
 
+	// Compactions held back as too small, once the prompt cache has expired: removing them now costs nothing,
+	// since the next request writes the whole context to the cache anyway. No model call.
+	const coldCuts = (ctx: ExtensionContext) => {
+		const entries = projection(ctx);
+		const lastAt = [...entries].reverse().map(first).find((m) => m?.role === "assistant")?.timestamp;
+		const ttl = cfg.cacheLifetime === "5m" ? 5 * 60_000 : 60 * 60_000;
+		if (typeof lastAt !== "number" || Date.now() - lastAt <= ttl) return undefined;
+		const live = new Set(entries.filter(visible).map((e) => e.sourceEntry.id));
+		const omit = new Set<string>();
+		const keys = new Set<string>();
+		const results = new Map<string, { id: string; text: string }>();
+		let removedTokens = 0;
+		// Latest first: a held-back cut whose call lies in a later one is skipped, since the later handoff
+		// does not cover its steps.
+		for (const e of [...entries].reverse()) {
+			if (!visible(e) || omit.has(e.sourceEntry.id)) continue;
+			const m = first(e);
+			const d: Deferred | undefined = m.role === "toolResult" && m.toolName === "todos" ? m.details?.deferred : undefined;
+			if (!d || !d.omit.every((id) => live.has(id))) continue;
+			for (const id of d.omit) omit.add(id);
+			for (const k of d.keys) keys.add(k);
+			results.set(m.toolCallId, { id: e.sourceEntry.id, text: d.text });
+			removedTokens += d.removedTokens;
+		}
+		return results.size > 0 ? { omit: [...omit], keys, results, removedTokens } : undefined;
+	};
+
 	pi.on("session_start", async (_event, ctx) => {
 		cfg = loadConfig();
 		pending.clear();
+		cold = undefined;
 		restore(ctx);
 		updateWidget(ctx);
 		updateStatus(ctx);
@@ -1462,6 +1537,8 @@ export default function (pi: ExtensionAPI) {
 		// messageType exists since pi 1.2; older versions only start runs from user prompts.
 		if ((event as { messageType?: string }).messageType === "custom") return;
 		archiveFinished(ctx);
+		cold = coldCuts(ctx);
+		if (cold) log(ctx, { kind: "cold-cut", removedTokens: cold.removedTokens, cuts: cold.results.size });
 		untrackedFrom = undefined;
 		run = { startTokens: contextTokens(ctx), compacted: false, nudged: false, closeAsked: false, closing: false, closeTotal: 0 };
 	});
