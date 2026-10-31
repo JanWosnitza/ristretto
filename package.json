@@ -1,0 +1,15 @@
+{
+  "name": "ristretto",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pi extension that lets the model compact finished work out of its own context, cache-friendly.",
+  "keywords": ["pi-package", "pi", "pi-extension"],
+  "type": "module",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.0.0",
+    "@earendil-works/pi-tui": ">=1.0.0"
+  }
+}
