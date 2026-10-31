@@ -64,11 +64,11 @@ Options are stored in `~/.pi/agent/ristretto.json`. Only values that differ from
 | `todoPanel` | `above` | Where the task list is shown: `above`, `below`, `side` or `off` |
 | `sideWidth` | 36 | Width of the side panel in columns |
 | `sideMinTerminalWidth` | 120 | Below this terminal width the side panel falls back to `above` |
-| `cacheWriteMultiplier` | 2 | Cache write price as a multiple of base input (2 for the 1h TTL, 1.25 for 5m) |
+| `cacheLifetime` | `1h` | How long the provider keeps the prompt cache: `5m` or `1h` |
 | `log` | true | Write usage and compactions to `~/.pi/agent/ristretto/log.jsonl` |
 | `recallModel` | (empty) | Helper model for `recall` as `provider/id`. Empty means the newest Haiku of the current provider |
 | `recallMaxTokens` | 3000 | Most original text attached to a `recall` answer |
-| `recallMaxInputTokens` | 150000 | Most removed history sent to the `recall` helper |
+| `recallMaxInputTokens` | 150000 | Most removed history sent to the `recall` helper, capped at 60% of the helper's context window. If the prompt is still too long, recall halves the amount and retries |
 
 ## Trade-offs
 

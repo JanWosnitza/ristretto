@@ -44,8 +44,8 @@ interface Config {
 	/** Side panel: width in columns, and the terminal width below which it falls back to "above". */
 	sideWidth: number;
 	sideMinTerminalWidth: number;
-	/** Cache write price as a multiple of base input (2 for the 1h TTL Claude Code uses, 1.25 for 5m). */
-	cacheWriteMultiplier: number;
+	/** How long the provider keeps the prompt cache: "5m" or "1h". */
+	cacheLifetime: "5m" | "1h";
 	/** Write one JSON line per request with its usage, and one per compaction. */
 	log: boolean;
 	/** recall: helper model as "provider/id"; empty = the newest Haiku of the current provider, else the current model. */
@@ -67,7 +67,7 @@ const DEFAULTS: Config = {
 	todoPanel: "above",
 	sideWidth: 36,
 	sideMinTerminalWidth: 120,
-	cacheWriteMultiplier: 2,
+	cacheLifetime: "1h",
 	log: true,
 	recallModel: "",
 	recallMaxTokens: 3_000,
@@ -88,21 +88,6 @@ function saveConfig(c: Config): void {
 	const diff = Object.fromEntries(Object.entries(c).filter(([k, v]) => (DEFAULTS as any)[k] !== v));
 	writeFileSync(CONFIG_FILE, `${JSON.stringify(diff, null, 2)}\n`);
 }
-
-// ---- pricing ----------------------------------------------------------------------------------
-
-function prices(ctx: ExtensionContext, cfg: Config) {
-	const cost = (ctx.model as any)?.cost ?? {};
-	const input = cost.input > 0 ? cost.input : 5;
-	return {
-		input,
-		output: cost.output > 0 ? cost.output : input * 5,
-		cacheRead: cost.cacheRead > 0 ? cost.cacheRead : input * 0.1,
-		cacheWrite: input * cfg.cacheWriteMultiplier,
-	};
-}
-
-const perTok = (perMTok: number) => perMTok / 1_000_000;
 
 // ---- todo list --------------------------------------------------------------------------------
 
@@ -382,7 +367,7 @@ export default function (pi: ExtensionAPI) {
 	let state = emptyState();
 	/** todos toolCallId -> compaction to apply at the end of the turn. */
 	const pending = new Map<string, { omit: string[]; removedTokens: number; close?: { promptId: string; answerTs: number; note: string } }>();
-	const stats = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, compactions: 0, removedTokens: 0 };
+	const stats = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, compactions: 0, removedTokens: 0 };
 	/** The current run: context size at its start, and whether it compacted or the model was nudged. */
 	let run = { startTokens: 0, compacted: false, nudged: false, closeAsked: false, closing: false, closeTotal: 0 };
 	/** First step tag of work done while no task was in progress (in this request, since the last compaction). */
@@ -596,6 +581,7 @@ export default function (pi: ExtensionAPI) {
 		stats.output += u.output;
 		stats.cacheRead += u.cacheRead;
 		stats.cacheWrite += u.cacheWrite;
+		stats.cost += u.cost?.total ?? 0;
 		log(ctx, { kind: "request", model: m.model, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, stop: m.stopReason });
 	});
 
@@ -1133,9 +1119,13 @@ export default function (pi: ExtensionAPI) {
 			const label = (s: Step) => (s.tag ? `[#${s.tag}]` : "[untagged]");
 			const usages: any[] = [];
 
-			const ask = async (steps: Step[]) => {
+			// Code and JSON run near 3 chars per token; keep room for the provider's system prompt and the answer.
+			const window = (model as any).contextWindow > 0 ? (model as any).contextWindow : 200_000;
+			let budgetTokens = Math.min(cfg.recallMaxInputTokens, Math.floor(window * 0.6));
+
+			const ask = async (steps: Step[]): Promise<{ answer: string; chosen: Step[]; found: boolean; tags: number[] }> => {
 				// History for the helper: newest steps first win when the budget is tight.
-				const budget = cfg.recallMaxInputTokens * 4;
+				const budget = budgetTokens * 3;
 				const perStep = Math.max(2_000, Math.floor(budget / steps.length));
 				const blocks: string[] = [];
 				let used = 0;
@@ -1153,6 +1143,10 @@ export default function (pi: ExtensionAPI) {
 					} as any,
 					{ signal, cacheRetention: "none", sessionId: randomUUID() } as any,
 				);
+				if (response.stopReason === "error" && /too long|context|token/i.test(response.errorMessage ?? "") && budgetTokens > 10_000) {
+					budgetTokens = Math.floor(budgetTokens / 2);
+					return ask(steps);
+				}
 				if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(`recall: helper failed (${response.errorMessage ?? response.stopReason}).`);
 				usages.push(response.usage);
 				const raw = response.content.map((b: any) => (b.type === "text" ? b.text : "")).join("");
@@ -1459,14 +1453,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("ristretto-stats", {
 		description: "Show ristretto activity and cache usage for this session",
 		handler: async (_args, ctx) => {
-			const p = prices(ctx, cfg);
-			const cost = stats.input * perTok(p.input) + stats.output * perTok(p.output) + stats.cacheRead * perTok(p.cacheRead) + stats.cacheWrite * perTok(p.cacheWrite);
 			const all = stats.cacheRead + stats.cacheWrite + stats.input;
 			ctx.ui.notify(
 				[
 					`requests ${stats.requests}, cache hit ${all > 0 ? ((stats.cacheRead / all) * 100).toFixed(1) : "0"}%`,
 					`input ${stats.input}, cacheRead ${stats.cacheRead}, cacheWrite ${stats.cacheWrite}, output ${stats.output}`,
-					`API-equivalent cost $${cost.toFixed(3)}`,
+					`API-equivalent cost $${stats.cost.toFixed(3)}`,
 					`compactions ${stats.compactions}, ~${stats.removedTokens} tokens removed`,
 					`log: ${LOG_FILE}`,
 				].join("\n"),
@@ -1486,6 +1478,7 @@ export default function (pi: ExtensionAPI) {
 				const value = typeof def === "number" ? Number(raw) : typeof def === "boolean" ? raw === "true" : raw;
 				if (typeof def === "number" && !Number.isFinite(value)) return ctx.ui.notify(`${key} needs a number`, "error");
 				if (key === "todoPanel" && !PANEL_MODES.includes(value as string)) return ctx.ui.notify(`todoPanel: one of ${PANEL_MODES.join(", ")}`, "error");
+				if (key === "cacheLifetime" && value !== "5m" && value !== "1h") return ctx.ui.notify("cacheLifetime: 5m or 1h", "error");
 				(cfg as any)[key] = value;
 				saveConfig(cfg);
 				if (key.startsWith("todoPanel") || key.startsWith("side")) {
