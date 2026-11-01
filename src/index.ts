@@ -297,6 +297,14 @@ function currentRequest(m: any, tags: Map<number, number>): string {
 const msgKey = (m: any) => (m.role === "toolResult" ? `r:${m.toolCallId}` : `${m.role}:${m.timestamp}`);
 
 // A compaction held back as too small: applied without the model once the prompt cache has expired.
+/** Earlier compactions, rejected as too small, whose steps a later compaction removed. */
+interface Covered {
+	count: number;
+	tokens: number;
+}
+
+const coveredLog = (c: Covered | undefined) => (c && c.count > 0 ? { coveredRejected: c.count, coveredRejectedTokens: c.tokens } : {});
+
 interface Deferred {
 	omit: string[];
 	keys: string[];
@@ -392,7 +400,7 @@ export default function (pi: ExtensionAPI) {
 	const answerNotes = new Map<number, string>();
 	let state = emptyState();
 	/** todos toolCallId -> compaction to apply at the end of the turn. */
-	const pending = new Map<string, { omit: string[]; removedTokens: number; close?: { promptId: string; answerTs: number; note: string } }>();
+	const pending = new Map<string, { omit: string[]; removedTokens: number; covered?: Covered; close?: { promptId: string; answerTs: number; note: string } }>();
 	const stats = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, compactions: 0, removedTokens: 0 };
 	/** The current run: context size at its start, and whether it compacted or the model was nudged. */
 	let usageGap = 0;
@@ -776,11 +784,12 @@ export default function (pi: ExtensionAPI) {
 
 			// 1. Validate the compaction before changing anything.
 			let plan:
-				| { omit: string[]; removedTokens: number; replaced: number; calls: string; start: number; earlier: boolean; requests: string; carried?: number; kept: number[]; keptTokens: number }
+				| { omit: string[]; removedTokens: number; replaced: number; calls: string; start: number; earlier: boolean; requests: string; carried?: number; kept: number[]; keptTokens: number; covered: Covered }
 				| undefined;
 			let note = "";
 			let compactFrom = 0;
 			let deferred: Deferred | undefined;
+			let rejected: { omit: string[]; removedTokens: number } | undefined;
 			if (params.keep?.length && params.compact_from === undefined) fail("keep needs compact_from.");
 			if (params.compact_from !== undefined) {
 				if (!params.handoff?.trim()) fail("compact_from needs a handoff.");
@@ -848,7 +857,11 @@ export default function (pi: ExtensionAPI) {
 				if (recallNow) {
 					note = "\n\nNot compacted: the range contains a recall result from this request. Answer the user from it; it is removed automatically after your answer.";
 				} else if (removed < cfg.minCompactTokens) {
-					note = `\n\nNot compacted: only ~${removed} tokens would be removed. Continue normally.`;
+					note =
+						`\n\nNot compacted: only ~${removed} tokens would be removed. The steps stay in your context; to remove them later, ` +
+						`start a compaction at [#${compactFrom}] or earlier, so they go together with the steps that follow. Continue normally.`;
+					rejected = { omit: span.filter(visible).map((e) => e.sourceEntry.id), removedTokens: removed };
+					log(ctx, { kind: "compact-rejected", from: compactFrom, removedTokens: removed });
 					// Held back while the cache is warm; applied without the model once it has expired.
 					const msgs = span.filter(visible).map(first);
 					if (!close && !requests && params.keep === undefined && msgs.every((m) => m.role === "assistant" || m.role === "toolResult")) {
@@ -866,7 +879,17 @@ export default function (pi: ExtensionAPI) {
 					const counts = new Map<string, number>();
 					for (const e of span) for (const b of toolCalls(first(e))) if (b.name !== "todos") counts.set(b.name, (counts.get(b.name) ?? 0) + 1);
 					const calls = [...counts].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(", ");
-					plan = { omit, removedTokens: removed, replaced, calls, start, earlier: start < current, requests, carried: carried ? currentMsg.timestamp : undefined, kept, keptTokens: tokensOf([...keptIdx].flatMap((i) => entries[i].messages)) };
+					// Earlier compactions rejected as too small whose steps this one removes: shows whether batching happens.
+					const omitSet = new Set(omit);
+					const covered: Covered = { count: 0, tokens: 0 };
+					for (const e of span) {
+						const r = first(e)?.role === "toolResult" && first(e).toolName === "todos" ? first(e).details?.rejected : undefined;
+						if (r?.omit?.length && r.omit.every((id: string) => omitSet.has(id))) {
+							covered.count++;
+							covered.tokens += r.removedTokens;
+						}
+					}
+					plan = { omit, removedTokens: removed, replaced, calls, start, earlier: start < current, requests, carried: carried ? currentMsg.timestamp : undefined, kept, keptTokens: tokensOf([...keptIdx].flatMap((i) => entries[i].messages)), covered };
 				}
 			}
 
@@ -972,6 +995,7 @@ export default function (pi: ExtensionAPI) {
 				pending.set(toolCallId, {
 					omit: plan?.omit ?? [],
 					removedTokens: plan?.removedTokens ?? 0,
+					covered: plan?.covered,
 					close: { promptId: entries[close.prompt].sourceEntry.id, answerTs: first(entries[close.answer]).timestamp, note: handoffNote },
 				});
 				if (plan) untrackedFrom = undefined;
@@ -981,7 +1005,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: done }], details: { state, compacted: !!plan }, terminate: true } as any;
 			}
 			if (plan) {
-				pending.set(toolCallId, { omit: plan.omit, removedTokens: plan.removedTokens });
+				pending.set(toolCallId, { omit: plan.omit, removedTokens: plan.removedTokens, covered: plan.covered });
 				untrackedFrom = undefined;
 				const from = compactFrom;
 				// Name the work: without it, a list that jumps from "created" to "done" reads as if nothing was done.
@@ -1015,7 +1039,7 @@ export default function (pi: ExtensionAPI) {
 					if (howTo) text += `\n\n${howTo}`;
 				}
 			}
-			return { content: [{ type: "text", text }], details: { state, compacted: !!plan, carried: plan?.carried, ...(deferred ? { deferred } : {}) } };
+			return { content: [{ type: "text", text }], details: { state, compacted: !!plan, carried: plan?.carried, ...(deferred ? { deferred } : {}), ...(rejected ? { rejected } : {}) } };
 		},
 	});
 
@@ -1298,7 +1322,7 @@ export default function (pi: ExtensionAPI) {
 					answerNotes.set(plan.close.answerTs, plan.close.note);
 					drafts.push({ type: "custom", customType: ANSWER_NOTE_TYPE, data: { ts: plan.close.answerTs, note: plan.close.note } });
 				}
-				log(ctx, { kind: "end-check", compacted: plan.omit.length > 0, removedTokens: plan.removedTokens, outcome: event.outcome });
+				log(ctx, { kind: "end-check", compacted: plan.omit.length > 0, removedTokens: plan.removedTokens, outcome: event.outcome, ...coveredLog(plan.covered) });
 				if (plan.omit.length === 0) continue;
 			} else if (event.outcome !== "completed") continue;
 			for (const id of plan.omit) drafts.push({ type: "context_edit", targetId: id, replacement: null });
@@ -1308,7 +1332,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			stats.compactions++;
 			stats.removedTokens += plan.removedTokens;
-			log(ctx, { kind: "compact", removedTokens: plan.removedTokens });
+			log(ctx, { kind: "compact", removedTokens: plan.removedTokens, ...coveredLog(plan.covered) });
 		}
 
 		if (cold) {
