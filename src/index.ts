@@ -44,8 +44,8 @@ interface Config {
 	/** Side panel: width in columns, and the terminal width below which it falls back to "above". */
 	sideWidth: number;
 	sideMinTerminalWidth: number;
-	/** How long the provider keeps the prompt cache: "5m" or "1h". */
-	cacheLifetime: "5m" | "1h";
+	/** How long the provider keeps the prompt cache: minutes as a number, or a number with s, m or h ("30s", "1.5h"). 0 = no cache, "infinite" = never expires. */
+	cacheLifetime: number | string;
 	/** Write one JSON line per request with its usage, and one per compaction. */
 	log: boolean;
 	/** recall: helper model as "provider/id"; empty = the newest Haiku of the current provider, else the current model. */
@@ -77,9 +77,24 @@ const DEFAULTS: Config = {
 const CONFIG_FILE = join(getAgentDir(), "ristretto.json");
 const LOG_FILE = join(getAgentDir(), "ristretto", "log.jsonl");
 
+/** A cache lifetime in milliseconds: minutes as a number, a number with s, m or h, or "infinite". Invalid: undefined. */
+export function parseLifetime(v: unknown): number | undefined {
+	if (typeof v === "number") return v >= 0 ? v * 60_000 : undefined;
+	if (typeof v !== "string") return undefined;
+	const s = v.trim().toLowerCase();
+	if (s === "infinite") return Infinity;
+	const m = /^(\d+(?:\.\d+)?|\.\d+)\s*(s|m|h)?$/.exec(s);
+	if (!m) return undefined;
+	return Number(m[1]) * { s: 1_000, m: 60_000, h: 3_600_000 }[(m[2] ?? "m") as "s" | "m" | "h"];
+}
+
 function loadConfig(): Config {
 	try {
-		if (existsSync(CONFIG_FILE)) return { ...DEFAULTS, ...JSON.parse(readFileSync(CONFIG_FILE, "utf8")) };
+		if (existsSync(CONFIG_FILE)) {
+			const c = { ...DEFAULTS, ...JSON.parse(readFileSync(CONFIG_FILE, "utf8")) };
+			if (parseLifetime(c.cacheLifetime) === undefined) c.cacheLifetime = DEFAULTS.cacheLifetime;
+			return c;
+		}
 	} catch {}
 	return { ...DEFAULTS };
 }
@@ -1497,7 +1512,7 @@ export default function (pi: ExtensionAPI) {
 	const coldCuts = (ctx: ExtensionContext) => {
 		const entries = projection(ctx);
 		const lastAt = [...entries].reverse().map(first).find((m) => m?.role === "assistant")?.timestamp;
-		const ttl = cfg.cacheLifetime === "5m" ? 5 * 60_000 : 60 * 60_000;
+		const ttl = parseLifetime(cfg.cacheLifetime) ?? 3_600_000;
 		if (typeof lastAt !== "number" || Date.now() - lastAt <= ttl) return undefined;
 		const live = new Set(entries.filter(visible).map((e) => e.sourceEntry.id));
 		const omit = new Set<string>();
@@ -1577,8 +1592,9 @@ export default function (pi: ExtensionAPI) {
 				const def = (DEFAULTS as any)[key];
 				const value = typeof def === "number" ? Number(raw) : typeof def === "boolean" ? raw === "true" : raw;
 				if (typeof def === "number" && !Number.isFinite(value)) return ctx.ui.notify(`${key} needs a number`, "error");
+				if (key === "cacheLifetime" && parseLifetime(value) === undefined)
+					return ctx.ui.notify("cacheLifetime: minutes, or a number with s, m or h (e.g. 30s, 5m, 1.5h); 0 = no cache; infinite", "error");
 				if (key === "todoPanel" && !PANEL_MODES.includes(value as string)) return ctx.ui.notify(`todoPanel: one of ${PANEL_MODES.join(", ")}`, "error");
-				if (key === "cacheLifetime" && value !== "5m" && value !== "1h") return ctx.ui.notify("cacheLifetime: 5m or 1h", "error");
 				(cfg as any)[key] = value;
 				saveConfig(cfg);
 				if (key.startsWith("todoPanel") || key.startsWith("side")) {

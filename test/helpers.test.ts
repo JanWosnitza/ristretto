@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cutStart, DEFAULTS, isType, removedRequests, renderCompact, renderList, stepTagOf } from "../src/index.ts";
+import { cutStart, DEFAULTS, isType, parseLifetime, removedRequests, renderCompact, renderList, stepTagOf } from "../src/index.ts";
 
 const text = (t: string) => ({ type: "text", text: t });
 
@@ -62,4 +62,18 @@ test("cutStart: a step of an earlier request takes the whole request", () => {
 	// A pi compaction is a hard floor.
 	const withCompaction = [{ sourceEntry: { type: "compaction" }, messages: [] }, ...entries];
 	assert.equal(cutStart(withCompaction, 3, 5), 1);
+});
+
+test("parseLifetime: minutes, units, 0 and infinite", () => {
+	assert.equal(parseLifetime(5), 300_000);
+	assert.equal(parseLifetime("2.5"), 150_000);
+	assert.equal(parseLifetime("30s"), 30_000);
+	assert.equal(parseLifetime("5m"), 300_000);
+	assert.equal(parseLifetime("1.5h"), 5_400_000);
+	assert.equal(parseLifetime("0"), 0);
+	assert.equal(parseLifetime("infinite"), Infinity);
+	assert.equal(parseLifetime("infinity"), undefined);
+	assert.equal(parseLifetime("-1"), undefined);
+	assert.equal(parseLifetime("1d"), undefined);
+	assert.equal(parseLifetime(""), undefined);
 });

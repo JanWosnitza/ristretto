@@ -64,7 +64,7 @@ Options are stored in `~/.pi/agent/ristretto.json`. Only values that differ from
 | `todoPanel` | `above` | Where the task list is shown: `above`, `below`, `side` or `off` |
 | `sideWidth` | 36 | Width of the side panel in columns |
 | `sideMinTerminalWidth` | 120 | Below this terminal width the side panel falls back to `above` |
-| `cacheLifetime` | `1h` | How long the provider keeps the prompt cache: `5m` or `1h`. Held-back compactions are applied after a longer pause |
+| `cacheLifetime` | `1h` | How long the provider keeps the prompt cache: minutes as a number, or a number with `s`, `m` or `h` (`30s`, `5m`, `1.5h`). `0` = no cache, `infinite` = never expires (e.g. a local model). Held-back compactions are applied after a longer pause |
 | `log` | true | Write usage and compactions to `~/.pi/agent/ristretto/log.jsonl` |
 | `recallModel` | (empty) | Helper model for `recall` as `provider/id`. Empty means the newest Haiku of the current provider |
 | `recallMaxTokens` | 3000 | Most original text attached to a `recall` answer |
